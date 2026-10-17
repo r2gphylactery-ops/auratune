@@ -363,80 +363,180 @@ void PitchGraph::tick()
         const float v = history.out[history.index (age)];
         if (v > 0.0f) { centre += (v - centre) * 0.06f; break; }
     }
+    phase += 0.12f;
     repaint();
 }
 
 void PitchGraph::paint (Graphics& g)
 {
-    auto r = getLocalBounds().toFloat();
+    const auto r = getLocalBounds().toFloat();
     Neon::drawPanel (g, r);
-    auto plot = r.reduced (14, 12).withTrimmedLeft (34);
 
+    const float gutter = 46.0f, headR = 34.0f;           // note labels left, "now" zone right
+    const auto plot = r.reduced (10, 30).withTrimmedLeft (gutter).withTrimmedRight (headR).withTrimmedBottom (-18);
     const float range = 7.0f;
-    auto yFor = [&] (float midi) { return plot.getCentreY() - (midi - centre) / range * plot.getHeight() * 0.5f; };
-
-    const auto scale = inScale (proc);
-    const int lo = (int) std::floor (centre - range), hi = (int) std::ceil (centre + range);
-
-    g.saveState();
-    g.reduceClipRegion (r.reduced (1).toNearestInt());
-    for (int m = lo; m <= hi; ++m)
-    {
-        const float y = yFor ((float) m);
-        if (y < plot.getY() - 2 || y > plot.getBottom() + 2) continue;
-        const int pc = pcOf (m);
-        const bool on = scale[(size_t) pc] && ! isRemoved (proc, pc);
-        g.setColour (on ? Neon::violet.withAlpha (0.22f) : Colours::white.withAlpha (0.035f));
-        g.fillRect (plot.getX(), y - 0.5f, plot.getWidth(), 1.0f);
-        if (on)
-        {
-            g.setColour (Neon::dim);
-            g.setFont (FontOptions (10.5f));
-            g.drawText (String (noteNames[pc]) + String (m / 12 - 1), Rectangle<float> (r.getX() + 6, y - 7, 38, 14), Justification::centredLeft);
-        }
-    }
+    const float semiH = plot.getHeight() / (2.0f * range);
+    auto yFor = [&] (float midi) { return plot.getCentreY() - (midi - centre) * semiH; };
 
     const int N = PitchHistory::size;
     auto xFor = [&] (int age) { return plot.getRight() - plot.getWidth() * (float) age / (float) (N - 1); };
 
+    const auto scale = inScale (proc);
+    const int lo = (int) std::floor (centre - range) - 1, hi = (int) std::ceil (centre + range) + 1;
+    const int curTarget = history.target[history.index (0)];
+    const float latestOut = history.out[history.index (0)];
+    const bool live = latestOut > 0.0f && curTarget >= 0;
+    const float pulse = 0.5f + 0.5f * std::sin (phase);
+
+    Graphics::ScopedSaveState clipState (g);
+    g.reduceClipRegion (r.reduced (1).toNearestInt());
+
+    // ---- piano-roll lanes -------------------------------------------------------------
+    for (int m = lo; m <= hi; ++m)
+    {
+        const float y = yFor ((float) m);
+        const int pc = pcOf (m);
+        const bool black = pc == 1 || pc == 3 || pc == 6 || pc == 8 || pc == 10;
+        const bool on = scale[(size_t) pc] && ! isRemoved (proc, pc);
+        auto lane = Rectangle<float> (r.getX() + 1, y - semiH * 0.5f, r.getWidth() - 2, semiH);
+
+        if (black) { g.setColour (Colours::black.withAlpha (0.16f)); g.fillRect (lane); }
+        if (on)    { g.setColour (Neon::magenta.withAlpha (0.045f)); g.fillRect (lane); }
+        if (m == curTarget && live)
+        {
+            ColourGradient band (Neon::magenta.withAlpha (0.0f), plot.getX(), 0, Neon::magenta.withAlpha (0.20f), plot.getRight() + headR, 0, false);
+            g.setGradientFill (band);
+            g.fillRect (lane);
+        }
+        g.setColour (on ? Neon::violet.withAlpha (0.16f) : Colours::white.withAlpha (0.03f));
+        g.fillRect (plot.getX(), y - 0.5f, plot.getWidth() + headR, 1.0f);
+
+        // note badge in the gutter
+        if (on || m == curTarget)
+        {
+            const bool active = m == curTarget && live;
+            auto badge = Rectangle<float> (r.getX() + 8, y - 8, gutter - 10, 16);
+            g.setColour (active ? Neon::magenta.withAlpha (0.55f + 0.25f * pulse) : Colours::white.withAlpha (0.04f));
+            g.fillRoundedRectangle (badge, 8.0f);
+            if (active)
+            {
+                g.setColour (Neon::cyan.withAlpha (0.25f));
+                g.drawRoundedRectangle (badge.expanded (1.5f), 9.0f, 1.0f);
+            }
+            g.setColour (active ? Colours::white : Neon::dim);
+            g.setFont (FontOptions (10.5f, active ? Font::bold : Font::plain));
+            g.drawText (String (noteNames[pc]) + String (m / 12 - 1), badge, Justification::centred);
+        }
+    }
+
+    // ---- scrolling time grid (one line per second) ------------------------------------------
+    for (int age = 0; age < N; ++age)
+        if ((history.total - age) % 30 == 0)
+        {
+            g.setColour (Colours::white.withAlpha (0.035f));
+            g.fillRect (xFor (age) - 0.5f, plot.getY() - 10, 1.0f, plot.getHeight() + 20);
+        }
+
+    // ---- target notes as glowing pills ------------------------------------------------------
+    {
+        int age = N - 1;
+        while (age >= 0)
+        {
+            const int t = history.target[history.index (age)];
+            if (t < 0) { --age; continue; }
+            int end = age;
+            while (end - 1 >= 0 && history.target[history.index (end - 1)] == t) --end;
+            const float x0 = xFor (age), x1 = xFor (end);
+            auto pill = Rectangle<float> (x0, yFor ((float) t) - semiH * 0.36f, jmax (6.0f, x1 - x0), semiH * 0.72f);
+            const bool current = end == 0 && live;
+            ColourGradient fill (Neon::magenta.withAlpha (current ? 0.40f : 0.24f), pill.getX(), 0,
+                                 Neon::violet.withAlpha (current ? 0.55f : 0.32f), pill.getRight(), 0, false);
+            g.setGradientFill (fill);
+            g.fillRoundedRectangle (pill, pill.getHeight() * 0.5f);
+            g.setColour (Neon::cyan.withAlpha (current ? 0.55f : 0.25f));
+            g.drawRoundedRectangle (pill, pill.getHeight() * 0.5f, 1.0f);
+            age = end - 1;
+        }
+    }
+
+    // ---- smooth curves -------------------------------------------------------------------------
     auto buildPath = [&] (const float* data)
     {
-        Path p; bool pen = false;
+        Path p; bool pen = false; Point<float> prev;
         for (int age = N - 1; age >= 0; --age)
         {
             const float v = data[history.index (age)];
             if (v <= 0.0f) { pen = false; continue; }
             const Point<float> pt (xFor (age), yFor (v));
-            if (! pen) { p.startNewSubPath (pt); pen = true; } else p.lineTo (pt);
+            if (! pen) { p.startNewSubPath (pt); pen = true; }
+            else       p.quadraticTo (prev, (prev + pt) * 0.5f);   // midpoint smoothing
+            prev = pt;
         }
         return p;
     };
 
-    // target note steps
+    // input: thin, neutral, fading into the past
     {
-        Path t; bool pen = false;
-        for (int age = N - 1; age >= 0; --age)
-        {
-            const int v = history.target[history.index (age)];
-            if (v < 0) { pen = false; continue; }
-            const Point<float> pt (xFor (age), yFor ((float) v));
-            if (! pen) { t.startNewSubPath (pt); pen = true; } else t.lineTo (pt);
-        }
-        g.setColour (Neon::magenta.withAlpha (0.35f));
-        g.strokePath (t, PathStrokeType (1.2f));
+        ColourGradient fade (Neon::grey.withAlpha (0.0f), plot.getX(), 0, Neon::grey.withAlpha (0.9f), plot.getRight(), 0, false);
+        g.setGradientFill (fade);
+        g.strokePath (buildPath (history.in), PathStrokeType (1.4f, PathStrokeType::curved, PathStrokeType::rounded));
+    }
+    // output: glowing lilac ribbon, brightest at "now"
+    {
+        const Path outPath = buildPath (history.out);
+        ColourGradient halo (Neon::magenta.withAlpha (0.0f), plot.getX(), 0, Neon::magenta.withAlpha (0.35f), plot.getRight(), 0, false);
+        g.setGradientFill (halo);
+        g.strokePath (outPath, PathStrokeType (7.0f, PathStrokeType::curved, PathStrokeType::rounded));
+        ColourGradient core (Neon::violet.withAlpha (0.15f), plot.getX(), 0, Neon::cyan, plot.getRight(), 0, false);
+        g.setGradientFill (core);
+        g.strokePath (outPath, PathStrokeType (2.4f, PathStrokeType::curved, PathStrokeType::rounded));
     }
 
-    g.setColour (Neon::grey.withAlpha (0.9f));
-    g.strokePath (buildPath (history.in), PathStrokeType (1.6f, PathStrokeType::curved, PathStrokeType::rounded));
-    Neon::glowStroke (g, buildPath (history.out), Neon::cyan, 2.2f);
-    g.restoreState();
+    // ---- "now" playhead -----------------------------------------------------------------------------
+    {
+        const float x = plot.getRight();
+        ColourGradient line (Neon::cyan.withAlpha (0.0f), x, r.getY() + 8, Neon::cyan.withAlpha (0.0f), x, r.getBottom() - 8, false);
+        line.addColour (0.5, Neon::cyan.withAlpha (0.45f));
+        g.setGradientFill (line);
+        g.fillRect (x - 0.75f, r.getY() + 8, 1.5f, r.getHeight() - 16);
 
-    // legend
-    auto lg = r.reduced (16, 10).removeFromTop (14);
-    g.setFont (FontOptions (11.0f, Font::bold));
-    g.setColour (Neon::cyan);       g.drawText ("OUTPUT", lg.removeFromRight (60), Justification::centredRight);
-    g.setColour (Neon::grey);       g.drawText ("INPUT",  lg.removeFromRight (56), Justification::centredRight);
-    g.setColour (Neon::magenta.withAlpha (0.7f)); g.drawText ("TARGET", lg.removeFromRight (60), Justification::centredRight);
+        if (live)
+        {
+            const Point<float> head (x, yFor (latestOut));
+            const float rad = 14.0f + 5.0f * pulse;
+            ColourGradient bloom (Neon::magenta.withAlpha (0.55f), head.x, head.y, Neon::magenta.withAlpha (0.0f), head.x + rad * 1.6f, head.y, true);
+            g.setGradientFill (bloom);
+            g.fillEllipse (head.x - rad * 1.6f, head.y - rad * 1.6f, rad * 3.2f, rad * 3.2f);
+            ColourGradient core (Neon::cyan.withAlpha (0.9f), head.x, head.y, Neon::cyan.withAlpha (0.0f), head.x + 8, head.y, true);
+            g.setGradientFill (core);
+            g.fillEllipse (head.x - 8, head.y - 8, 16, 16);
+            g.setColour (Colours::white);
+            g.fillEllipse (head.x - 3, head.y - 3, 6, 6);
+        }
+    }
+
+    // ---- legend pills ----------------------------------------------------------------------------------
+    {
+        auto lg = r.reduced (14, 9).removeFromTop (16);
+        auto pill = [&] (const String& text, Colour dot, float w)
+        {
+            auto b = lg.removeFromRight (w);
+            lg.removeFromRight (6);
+            g.setColour (Colours::black.withAlpha (0.25f));
+            g.fillRoundedRectangle (b, 8.0f);
+            g.setColour (dot);
+            g.fillEllipse (b.getX() + 7, b.getCentreY() - 3, 6, 6);
+            g.setColour (Neon::dim);
+            g.setFont (FontOptions (10.0f, Font::bold));
+            g.drawText (text, b.withTrimmedLeft (17), Justification::centredLeft);
+        };
+        pill ("OUTPUT", Neon::cyan, 66);
+        pill ("INPUT", Neon::grey, 56);
+        pill ("TARGET", Neon::magenta, 64);
+        g.setColour (Neon::dim);
+        g.setFont (FontOptions (11.5f, Font::bold));
+        g.drawText ("PITCH", r.reduced (16, 9).removeFromTop (16), Justification::centredLeft);
+    }
 }
 
 // ============================================================================

@@ -41,7 +41,8 @@ struct PitchHistory
     float in[size] {}, out[size] {};
     int   target[size] {};
     int   write = 0;
-    void push (float i, float o, int t) { in[write] = i; out[write] = o; target[write] = t; write = (write + 1) % size; }
+    long long total = 0;                      // number of pushes so far (drives the scrolling time grid)
+    void push (float i, float o, int t) { in[write] = i; out[write] = o; target[write] = t; write = (write + 1) % size; ++total; }
     int index (int age) const { return ((write - 1 - age) % size + size) % size; }   // age 0 = newest
 };
 
@@ -55,6 +56,7 @@ private:
     const PitchHistory& history;
     AuraTuneProcessor& proc;
     float centre = 60.0f;
+    float phase = 0.0f;
 };
 
 class NoteDisplay : public juce::Component
